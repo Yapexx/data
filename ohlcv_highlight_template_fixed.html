@@ -1,0 +1,500 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>OHLCV Highlight Viewer – Drag & Drop (EMA 7 & 25)</title>
+
+  <!-- Highcharts Stock -->
+  <script src="https://code.highcharts.com/stock/highstock.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #020617;
+      color: #e5e7eb;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      padding: 12px 20px;
+      border-bottom: 1px solid #1f2937;
+      background: #020617;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 {
+      font-size: 18px;
+      margin: 0;
+    }
+    header .meta {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #drop-zone {
+      margin: 12px 20px;
+      padding: 20px;
+      border-radius: 12px;
+      border: 1px dashed #4b5563;
+      background: rgba(15, 23, 42, 0.9);
+      text-align: center;
+      transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+      cursor: pointer;
+    }
+    #drop-zone.dragover {
+      border-color: #60a5fa;
+      background: rgba(30, 64, 175, 0.6);
+      transform: translateY(-1px);
+    }
+    #drop-zone h2 {
+      margin: 0 0 4px;
+      font-size: 15px;
+    }
+    #drop-zone p {
+      margin: 0;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #status {
+      margin: 0 20px 8px;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #container {
+      flex: 1;
+      min-height: 480px;
+      margin: 0 0 8px;
+    }
+    footer {
+      font-size: 11px;
+      color: #6b7280;
+      padding: 4px 20px 8px;
+      border-top: 1px solid #111827;
+      background: #020617;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    code {
+      background: #111827;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+    a {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>OHLCV Highlight Viewer</h1>
+    <div class="meta">Candlesticks + Volume + EMA(7)&(25) + Highlight Colors + Extra Fields in Tooltip</div>
+  </div>
+  <div class="meta" id="file-info">No file loaded</div>
+</header>
+
+<div id="drop-zone">
+  <h2>Drop your OHLCV CSV here</h2>
+  <p>
+    Expected columns (min): 
+    <code>timestamp/open/high/low/close</code>, optional: 
+    <code>volume</code>, <code>highlight</code> (0–5), and any extra fields (e.g. <code>adx</code>, <code>atr</code>, <code>rsi</code>…).
+  </p>
+</div>
+
+<div id="status">Waiting for CSV…</div>
+
+<div id="container"></div>
+
+<footer>
+  <span>Highlight colors: 0–5 mapped to indigo, sky, emerald, amber, orange, rose.</span>
+  <span>All extra columns appear in tooltip for each candle.</span>
+</footer>
+
+<input type="file" id="file-input" accept=".csv,text/csv" style="display:none" />
+
+<script>
+  const dropZone = document.getElementById('drop-zone');
+  const statusEl = document.getElementById('status');
+  const fileInput = document.getElementById('file-input');
+  const fileInfo = document.getElementById('file-info');
+
+  const highlightColors = {
+    0: "#6366F1",
+    1: "#0EA5E9",
+    2: "#10B981",
+    3: "#F59E0B",
+    4: "#F97316",
+    5: "#F43F5E"
+  };
+
+  function setStatus(msg, isError = false) {
+    statusEl.textContent = msg;
+    statusEl.style.color = isError ? '#f97373' : '#9ca3af';
+  }
+
+  function parseCSV(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    if (lines.length < 2) {
+      throw new Error('CSV appears empty or has no data rows.');
+    }
+
+    const header = lines[0].split(',').map(h => h.trim());
+    const headerLower = header.map(h => h.toLowerCase());
+
+    function findCol(names) {
+      for (let n of names) {
+        const idx = headerLower.indexOf(n);
+        if (idx !== -1) return idx;
+      }
+      return -1;
+    }
+
+    const idxTime = findCol(['timestamp', 'time', 'date', 'datetime']);
+    const idxOpen = findCol(['open', 'o']);
+    const idxHigh = findCol(['high', 'h']);
+    const idxLow  = findCol(['low', 'l']);
+    const idxClose = findCol(['close', 'c']);
+    const idxVol  = findCol(['volume', 'vol', 'v']);
+    const idxHighlight = findCol(['highlight', 'hl']);
+
+    if (idxTime === -1 || idxOpen === -1 || idxHigh === -1 || idxLow === -1 || idxClose === -1) {
+      throw new Error('Missing one of required columns: time/timestamp, open, high, low, close.');
+    }
+
+    const extraIndices = [];
+    for (let i = 0; i < header.length; i++) {
+      if ([idxTime, idxOpen, idxHigh, idxLow, idxClose, idxVol, idxHighlight].includes(i)) continue;
+      extraIndices.push(i);
+    }
+
+    const ohlc = [];
+    const volume = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const row = lines[i].split(',');
+      if (row.length < header.length) continue;
+
+      let tRaw = row[idxTime].trim();
+      if (!tRaw) continue;
+
+      let t;
+      if (/^\d+$/.test(tRaw)) {
+        const num = parseInt(tRaw, 10);
+        t = (tRaw.length >= 12) ? num : num * 1000;
+      } else {
+        const parsed = Date.parse(tRaw);
+        if (isNaN(parsed)) continue;
+        t = parsed;
+      }
+
+      const o = parseFloat(row[idxOpen]);
+      const h = parseFloat(row[idxHigh]);
+      const l = parseFloat(row[idxLow]);
+      const c = parseFloat(row[idxClose]);
+      if (![o, h, l, c].every(v => Number.isFinite(v))) continue;
+
+      let highlightVal = null;
+      if (idxHighlight !== -1) {
+        const hv = row[idxHighlight].trim();
+        if (hv !== '') {
+          const num = Number(hv);
+          if (Number.isFinite(num)) {
+            highlightVal = num;
+          }
+        }
+      }
+
+      const extra = {};
+      for (const idx of extraIndices) {
+        const name = header[idx];
+        const raw = row[idx].trim();
+        if (raw === '') continue;
+        const num = Number(raw);
+        extra[name] = Number.isFinite(num) && raw.match(/^[-+]?\d*\.?\d+(e[-+]?\d+)?$/i) ? num : raw;
+      }
+
+      if (highlightVal !== null) {
+        extra['highlight'] = highlightVal;
+      }
+
+      const point = {
+        x: t,
+        open: o,
+        high: h,
+        low: l,
+        close: c,
+        custom: extra
+      };
+
+      if (highlightVal !== null && highlightColors.hasOwnProperty(highlightVal)) {
+        point.color = highlightColors[highlightVal];
+        point.borderColor = highlightColors[highlightVal];
+      }
+
+      ohlc.push(point);
+
+      if (idxVol !== -1) {
+        const vRaw = row[idxVol].trim();
+        if (vRaw !== '') {
+          const v = parseFloat(vRaw);
+          if (Number.isFinite(v)) {
+            volume.push([t, v]);
+          }
+        }
+      }
+    }
+
+    if (ohlc.length === 0) {
+      throw new Error('No valid OHLC rows parsed from CSV.');
+    }
+
+    ohlc.sort((a, b) => a.x - b.x);
+    volume.sort((a, b) => a[0] - b[0]);
+
+    return { ohlc, volume };
+  }
+
+  function calculateEMA(ohlc, period) {
+    if (!ohlc || ohlc.length < period) return [];
+
+    const multiplier = 2 / (period + 1);
+    const ema = [];
+
+    // Seed with an SMA over the first `period` closes.
+    let sum = 0;
+    for (let i = 0; i < period; i++) {
+      sum += ohlc[i].close;
+    }
+
+    let prevEma = sum / period;
+    ema.push([ohlc[period - 1].x, prevEma]);
+
+    for (let i = period; i < ohlc.length; i++) {
+      const value = (ohlc[i].close - prevEma) * multiplier + prevEma;
+      ema.push([ohlc[i].x, value]);
+      prevEma = value;
+    }
+
+    return ema;
+  }
+
+  function renderChart(ohlc, volume, fileName) {
+    const ema7 = calculateEMA(ohlc, 7);
+    const ema25 = calculateEMA(ohlc, 25);
+
+    Highcharts.setOptions({
+      chart: {
+        backgroundColor: '#020617'
+      },
+      rangeSelector: {
+        buttonTheme: {
+          fill: '#020617',
+          stroke: '#4b5563',
+          style: { color: '#e5e7eb' },
+          states: {
+            hover: { fill: '#111827', style: { color: '#e5e7eb' } },
+            select: { fill: '#1d4ed8', style: { color: 'white' } }
+          }
+        },
+        inputBoxBorderColor: '#4b5563',
+        inputStyle: {
+          backgroundColor: '#020617',
+          color: '#e5e7eb'
+        },
+        labelStyle: {
+          color: '#9ca3af'
+        }
+      },
+      xAxis: {
+        gridLineColor: '#111827',
+        lineColor: '#111827',
+        tickColor: '#111827',
+        labels: { style: { color: '#9ca3af' } }
+      },
+      yAxis: [{
+        gridLineColor: '#111827',
+        labels: { style: { color: '#9ca3af' } },
+        title: { style: { color: '#e5e7eb' } }
+      }, {
+        gridLineColor: '#111827',
+        labels: { style: { color: '#9ca3af' } },
+        title: { style: { color: '#e5e7eb' } }
+      }],
+      tooltip: {
+        backgroundColor: '#020617',
+        borderColor: '#4b5563',
+        style: { color: '#e5e7eb', fontSize: '11px' }
+      }
+    });
+
+    Highcharts.stockChart('container', {
+      rangeSelector: { selected: 2 },
+      title: { text: (fileName || 'OHLCV CSV') + ' + Highlight & Extras' },
+      tooltip: {
+        shared: true,
+        useHTML: true,
+        formatter: function () {
+          const points = this.points || [];
+          const x = this.x;
+          const dateStr = Highcharts.dateFormat('%Y-%m-%d %H:%M', x);
+
+          let ohlcPoint = null;
+          let volPoint = null;
+
+          points.forEach(p => {
+            if (p.series.type === 'candlestick') ohlcPoint = p.point;
+            if (p.series.type === 'column' && p.series.name === 'Volume') volPoint = p;
+          });
+
+          if (!ohlcPoint) {
+            return 'No data';
+          }
+
+          let html = '<span style="font-size: 10px; color:#9ca3af;">' + dateStr + '</span><br/>';
+          html += '<span style="color:#e5e7eb;">O: </span>' + Highcharts.numberFormat(ohlcPoint.open, 4) +
+                  ' <span style="color:#e5e7eb;"> H: </span>' + Highcharts.numberFormat(ohlcPoint.high, 4) +
+                  ' <span style="color:#e5e7eb;"> L: </span>' + Highcharts.numberFormat(ohlcPoint.low, 4) +
+                  ' <span style="color:#e5e7eb;"> C: </span>' + Highcharts.numberFormat(ohlcPoint.close, 4) + '<br/>';
+
+          if (volPoint) {
+            html += '<span style="color:#9ca3af;">Volume: </span>' +
+                    Highcharts.numberFormat(volPoint.y, 2) + '<br/>';
+          }
+
+          const extra = ohlcPoint.custom || {};
+          const keys = Object.keys(extra).filter(k => k !== 'highlight');
+          if (extra.hasOwnProperty('highlight')) {
+            html += '<span style="color:#9ca3af;">Highlight: </span>' + extra['highlight'] + '<br/>';
+          }
+          keys.forEach(k => {
+            html += '<span style="color:#9ca3af;">' + k + ': </span>' + extra[k] + '<br/>';
+          });
+
+          return html;
+        }
+      },
+      series: [
+        {
+          type: 'candlestick',
+          id: 'main',
+          name: 'Price',
+          data: ohlc
+        },
+        {
+          type: 'column',
+          id: 'volume',
+          name: 'Volume',
+          data: volume,
+          yAxis: 1
+        },
+        {
+          type: 'line',
+          name: 'EMA 7',
+          data: ema7,
+          marker: { enabled: false },
+          enableMouseTracking: false
+        },
+        {
+          type: 'line',
+          name: 'EMA 25',
+          data: ema25,
+          marker: { enabled: false },
+          enableMouseTracking: false
+        }
+      ],
+      yAxis: [
+        {
+          height: '70%',
+          resize: { enabled: true },
+          title: { text: 'Price' }
+        },
+        {
+          top: '72%',
+          height: '28%',
+          title: { text: 'Volume' }
+        }
+      ]
+    });
+  }
+
+  function handleFile(file) {
+    if (!file) return;
+    fileInfo.textContent = 'Loaded: ' + file.name;
+    setStatus('Reading file…');
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const { ohlc, volume } = parseCSV(e.target.result);
+        setStatus('Parsed ' + ohlc.length + ' candles' + (volume.length ? (' and ' + volume.length + ' volume bars.') : '.'));
+        renderChart(ohlc, volume, file.name);
+      } catch (err) {
+        console.error(err);
+        setStatus('Error: ' + err.message, true);
+      }
+    };
+    reader.onerror = () => {
+      setStatus('Failed to read file.', true);
+    };
+    reader.readAsText(file);
+  }
+
+  ['dragenter', 'dragover'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.add('dragover');
+      setStatus('Drop CSV to load…');
+    });
+  });
+
+  ['dragleave', 'drop'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove('dragover');
+      if (eventName === 'dragleave') {
+        setStatus('Waiting for CSV…');
+      }
+    });
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer;
+    const file = dt && dt.files && dt.files[0];
+    if (file) {
+      handleFile(file);
+    }
+  });
+
+  dropZone.addEventListener('click', () => {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) {
+      handleFile(file);
+    }
+  });
+
+  setStatus('Waiting for CSV…');
+</script>
+
+</body>
+</html>
