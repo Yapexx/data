@@ -1,0 +1,66 @@
+ would make the probability of a worthwhile reversal from an executable entry the main research direction, while keeping exact-
+  pivot prediction as a secondary benchmark.
+
+  Exact-extreme prediction is reasonable to investigate, but it imposes a demanding timing requirement. A prediction one bar before
+  the eventual low is counted as wrong—even if the resulting trade works well. Conversely, correctly identifying a low at the close
+  can leave little opportunity if price has already rebounded sharply within that candle.
+
+  A broader reversal target relaxes that timing requirement. Whether it is actually easier to predict is something we must measure;
+  making an event more common does not necessarily make it more informative.
+
+  The question I would train toward is:
+
+  > Given everything available at this bar’s close, does a trade against the current leg have a favorable outcome before an
+  > unacceptable adverse move?
+
+  That gives us a direct connection between prediction and a potential trading decision.
+
+  For the first experiment, I suggest this concrete definition:
+
+  - Determine the proposed trade direction from the causal leg state: consider a long against a downward leg, or a short against an
+    upward leg.
+
+  - Observe features at bar t’s close; assume entry at the next bar’s open, with execution costs.
+  - Freeze the volatility scale at ATR[t].
+  - Record whether a favorable price barrier, an adverse barrier, or a time limit is reached first.
+
+  For example, we could initially examine +1.5 ATR before −1 ATR within 12 hourly bars. Those numbers would be a starting research
+  specification, not claimed optimal settings. This is the triple-barrier labeling approach: two price boundaries and one time
+  boundary. Method description (https://mlfinpy.readthedocs.io/en/stable/Labelling.html#triple-barrier-method).
+
+  Keep timeout outcomes separate, including their actual returns. If both price barriers are touched in the same candle, mark the
+  ordering as ambiguous; use finer data or a conservative execution assumption when evaluating trades.
+
+  I would proceed in this order:
+
+  1. Add these economic labels beside the exact-pivot labels. Reuse the existing forward-excursion helpers. Compute outcomes for
+     every eligible bar initially, so a hand-picked entry filter does not predetermine the answer.
+
+  2. Do descriptive analysis before ML. Use FeatureEvaluator to inspect which features relate to favorable outcomes, whether the
+     relationships persist through time, and whether long and short cases behave differently. Start with a small feature set rather
+     than every derived score.
+
+  3. Fit one simple probability baseline. Compare it with the unconditional event rate, the existing heuristic score, and a simple
+     model such as logistic regression. Check whether higher predicted probabilities correspond to higher observed success rates; a
+     classifier’s probability output is not automatically calibrated. Calibration documentation
+     (https://scikit-learn.org/stable/modules/calibration.html).
+
+  4. Evaluate the actual trading policy separately. Use chronological validation, removing training examples whose outcome windows
+     extend into validation. A time-ordered splitter provides the basic ordering, but label-resolution times still need explicit
+     handling. TimeSeriesSplit documentation
+     (https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html).
+
+     At this stage, specify fees, slippage, exits, and position overlap. I would initially allow one position at a time: twelve
+     adjacent positive predictions should not silently become twelve independent trades.
+
+  The decision criterion should ultimately be expected net return relative to risk, rather than reversal probability alone. A high
+  success rate can still lose money if adverse moves are larger, and timeout trades also affect the result.
+
+  For data, I would keep daily bars as a correctness check and make hourly bars the first strategy-research timeframe. The current
+  1,464-hour slice is suitable for developing the labels and pipeline. Once those definitions are frozen, use a predetermined
+  additional block of existing hourly history for chronological validation. We should not treat results from the sample we repeatedly
+  inspected as evidence of a trading edge.
+
+  My recommended next deliverable is therefore a reversal-outcome dataset and descriptive report comparing exact pivots with
+  executable trade outcomes. That will tell us whether the current features identify useful opportunities—and whether predicting the
+  precise turning bar adds anything.
