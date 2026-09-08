@@ -1,0 +1,351 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>OHLCV CSV Viewer – Drag & Drop (EMA 7 & 25)</title>
+
+  <!-- Highcharts Stock + Indicators -->
+  <script src="https://code.highcharts.com/stock/highstock.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #0b1120;
+      color: #e5e7eb;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      padding: 12px 20px;
+      border-bottom: 1px solid #1f2937;
+      background: #020617;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 {
+      font-size: 18px;
+      margin: 0;
+    }
+    header .meta {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #drop-zone {
+      margin: 12px 20px;
+      padding: 20px;
+      border-radius: 12px;
+      border: 1px dashed #4b5563;
+      background: rgba(15, 23, 42, 0.8);
+      text-align: center;
+      transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+      cursor: pointer;
+    }
+    #drop-zone.dragover {
+      border-color: #60a5fa;
+      background: rgba(30, 64, 175, 0.5);
+      transform: translateY(-1px);
+    }
+    #drop-zone h2 {
+      margin: 0 0 4px;
+      font-size: 15px;
+    }
+    #drop-zone p {
+      margin: 0;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #status {
+      margin: 0 20px 8px;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #container {
+      flex: 1;
+      min-height: 480px;
+      margin: 0 0 8px;
+    }
+    footer {
+      font-size: 11px;
+      color: #6b7280;
+      padding: 4px 20px 8px;
+      border-top: 1px solid #111827;
+      background: #020617;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    code {
+      background: #111827;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+    a {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>OHLCV CSV Viewer</h1>
+    <div class="meta">Candlesticks + Volume + EMA(7) + EMA(25)</div>
+  </div>
+  <div class="meta" id="file-info">No file loaded</div>
+</header>
+
+<div id="drop-zone">
+  <h2>Drop your OHLCV CSV here</h2>
+  <p>or click to choose a file. Expected columns: <code>timestamp/open/high/low/close/volume</code> or <code>datetime/open/high/low/close/volume</code>.</p>
+</div>
+
+<div id="status">Waiting for CSV…</div>
+
+<div id="container"></div>
+
+<footer>
+  <span>Tip: timestamps can be in ms since epoch or ISO strings (e.g. <code>2025-01-01 12:00:00</code>).</span>
+  <span>Template: drag & drop CSV → instant chart.</span>
+</footer>
+
+<input type="file" id="file-input" accept=".csv,text/csv" style="display:none" />
+
+<script>
+  const dropZone = document.getElementById('drop-zone');
+  const statusEl = document.getElementById('status');
+  const fileInput = document.getElementById('file-input');
+  const fileInfo = document.getElementById('file-info');
+
+  function setStatus(msg, isError = false) {
+    statusEl.textContent = msg;
+    statusEl.style.color = isError ? '#f97373' : '#9ca3af';
+  }
+
+  function parseCSV(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    if (lines.length < 2) {
+      throw new Error('CSV appears empty or has no data rows.');
+    }
+
+    const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+
+    function findCol(names) {
+      for (let n of names) {
+        const idx = header.indexOf(n);
+        if (idx !== -1) return idx;
+      }
+      return -1;
+    }
+
+    const idxTime = findCol(['timestamp', 'time', 'date', 'datetime']);
+    const idxOpen = findCol(['open', 'o']);
+    const idxHigh = findCol(['high', 'h']);
+    const idxLow  = findCol(['low', 'l']);
+    const idxClose = findCol(['close', 'c']);
+    const idxVol  = findCol(['volume', 'vol', 'v']);
+
+    if (idxTime === -1 || idxOpen === -1 || idxHigh === -1 || idxLow === -1 || idxClose === -1) {
+      throw new Error('Missing one of required columns: time/timestamp, open, high, low, close.');
+    }
+
+    const ohlc = [];
+    const volume = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const row = lines[i].split(',');
+      if (row.length < header.length) continue;
+
+      let tRaw = row[idxTime].trim();
+      let t;
+      if (!tRaw) continue;
+
+      if (/^\d+$/.test(tRaw)) {
+        // numeric timestamp; assume ms if length >= 12, else seconds
+        const num = parseInt(tRaw, 10);
+        t = (tRaw.length >= 12) ? num : num * 1000;
+      } else {
+        const parsed = Date.parse(tRaw);
+        if (isNaN(parsed)) continue;
+        t = parsed;
+      }
+
+      const o = parseFloat(row[idxOpen]);
+      const h = parseFloat(row[idxHigh]);
+      const l = parseFloat(row[idxLow]);
+      const c = parseFloat(row[idxClose]);
+
+      if (![o, h, l, c].every(v => Number.isFinite(v))) continue;
+
+      ohlc.push([t, o, h, l, c]);
+
+      if (idxVol !== -1) {
+        const v = parseFloat(row[idxVol]);
+        if (Number.isFinite(v)) {
+          volume.push([t, v]);
+        }
+      }
+    }
+
+    if (ohlc.length === 0) {
+      throw new Error('No valid OHLC rows parsed from CSV.');
+    }
+
+    // Sort by time
+    ohlc.sort((a, b) => a[0] - b[0]);
+    volume.sort((a, b) => a[0] - b[0]);
+
+    return { ohlc, volume };
+  }
+
+  function calculateEMA(ohlc, period) {
+    if (!ohlc.length) return [];
+
+    const multiplier = 2 / (period + 1);
+    const result = [];
+    let ema = ohlc[0][4];
+
+    for (let i = 0; i < ohlc.length; i++) {
+      const close = ohlc[i][4];
+      ema = (i === 0) ? close : (close - ema) * multiplier + ema;
+      result.push([ohlc[i][0], ema]);
+    }
+
+    return result;
+  }
+
+  function renderChart(ohlc, volume, fileName) {
+    if (typeof Highcharts === 'undefined') {
+      throw new Error('Highcharts failed to load. Check your internet connection or CDN access.');
+    }
+
+    const ema7 = calculateEMA(ohlc, 7);
+    const ema25 = calculateEMA(ohlc, 25);
+
+    Highcharts.stockChart('container', {
+      rangeSelector: { selected: 2 },
+      title: { text: (fileName || 'OHLCV CSV') + ' + EMA(7) & EMA(25)' },
+      series: [
+        {
+          type: 'candlestick',
+          id: 'main',
+          name: 'Price',
+          data: ohlc
+        },
+        {
+          type: 'column',
+          id: 'volume',
+          name: 'Volume',
+          data: volume,
+          yAxis: 1
+        },
+        {
+          type: 'line',
+          name: 'EMA 7',
+          data: ema7,
+          marker: { enabled: false },
+          tooltip: { valueDecimals: 4 }
+        },
+        {
+          type: 'line',
+          name: 'EMA 25',
+          data: ema25,
+          marker: { enabled: false },
+          tooltip: { valueDecimals: 4 }
+        }
+      ],
+      yAxis: [
+        {
+          height: '70%',
+          resize: { enabled: true },
+          title: { text: 'Price' }
+        },
+        {
+          top: '72%',
+          height: '28%',
+          title: { text: 'Volume' }
+        }
+      ]
+    });
+  }
+
+  function handleFile(file) {
+    if (!file) return;
+    fileInfo.textContent = 'Loaded: ' + file.name;
+    setStatus('Reading file…');
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const { ohlc, volume } = parseCSV(e.target.result);
+        setStatus('Parsed ' + ohlc.length + ' candles' + (volume.length ? (' and ' + volume.length + ' volume bars.') : '.'));
+        renderChart(ohlc, volume, file.name);
+      } catch (err) {
+        console.error(err);
+        setStatus('Error: ' + err.message, true);
+      }
+    };
+    reader.onerror = () => {
+      setStatus('Failed to read file.', true);
+    };
+    reader.readAsText(file);
+  }
+
+  // Drag & drop events
+  ;['dragenter', 'dragover'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.add('dragover');
+      setStatus('Drop CSV to load…');
+    });
+  });
+
+  ;['dragleave', 'drop'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove('dragover');
+      if (eventName === 'dragleave') {
+        setStatus('Waiting for CSV…');
+      }
+    });
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer;
+    const file = dt && dt.files && dt.files[0];
+    if (file) {
+      handleFile(file);
+    }
+  });
+
+  // Click to open file dialog
+  dropZone.addEventListener('click', () => {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) {
+      handleFile(file);
+    }
+  });
+
+  setStatus('Waiting for CSV…');
+</script>
+
+</body>
+</html>
