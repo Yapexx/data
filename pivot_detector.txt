@@ -1,0 +1,320 @@
+We are resuming an existing crypto quantitative research project around a streaming ATR-based ZigZag/pivot detector.
+
+Before modifying anything, inspect the repository and read the relevant files, especially:
+
+* `crypto_quant_engine/signals/pivot_detector.py`
+* `crypto_quant_engine/analysis/feature_explorer.py`
+* the pivot scenario implementation (`pivot.py` / scenarios related to pivots)
+* generic Signal/Scenario infrastructure where relevant
+* any existing dataset-building or analysis utilities that can be reused
+
+Do not assume the existing design is correct. I want you to challenge it and help turn it into a rigorous research experiment.
+
+## Research objective
+
+The ultimate objective is NOT to predict when the ZigZag finally confirms a pivot.
+
+A ZigZag extreme occurs at an earlier bar `t*` and is only confirmed later at `t_c`.
+
+What we want to investigate is:
+
+> Using only information causally available at the close of bar `t`, can we estimate the probability that this exact bar `t` will later be identified as the true pivot bar `t*`?
+
+The motivation is to identify probable exhaustion / turning points as early as possible, ideally on or close to the actual extreme, rather than waiting for ZigZag confirmation.
+
+The ZigZag therefore has two roles:
+
+1. maintain causal market/leg state and generate per-bar features;
+2. retrospectively identify `t*` bars that can be used as supervised-learning labels.
+
+Do NOT use the confirmation bar `t_c` as the positive target unless we explicitly decide to investigate that as a separate experiment.
+
+## Important causal/state convention
+
+The current design intentionally computes a bar's predictive features BEFORE applying any pivot that becomes confirmed on that same bar.
+
+So on confirmation bar `t_c`:
+
+* features returned for `t_c` must represent the state that was known before the pivot transition;
+* `mark_pivot()` is applied afterwards;
+* the updated pivot/macro/micro state is stored for subsequent bars;
+* historical rows are never recomputed.
+
+This is deliberate because the ML inputs for a bar must not contain information derived from a pivot confirmation that only became known after evaluating that bar.
+
+Please audit that this invariant is actually respected everywhere in the current implementation.
+
+## Existing ZigZag / pivot features
+
+The detector currently contains or returns features including approximately:
+
+Structural/context:
+
+* direction
+* macro_trend
+* structure_macro
+* structure_micro
+* previous pivot type/index/time/price
+* confirmed local high / local low
+* leg high / leg low
+* running potential pivot / running extreme
+
+Volatility / reversal:
+
+* ATR
+* pullback_ratio
+* early_reversal
+* leg_age_norm
+* leg_amp_norm
+
+Candle / momentum:
+
+* normalized upper/lower wick information
+* volume_z
+* divergence_flag
+* ADX
+* adx_factor
+* adx_rising
+* adx_regime
+
+Exhaustion:
+
+* leg_exhaust_atr
+* slope_decay
+* exhaustion_score
+* leg_compression
+* leg_inefficiency
+* microcycle_count
+* microcycle_density
+
+Retracement / structural depth:
+
+* retracement
+* nearest_fib
+* macro_retracement
+* macro_nearest_fib
+* bars_since_macro_anchor
+
+There is also an existing hand-crafted `pivot_score` / ADX-adjusted score. Treat this as an existing heuristic to benchmark, NOT as ground truth.
+
+## Recent issue to verify carefully
+
+We were revisiting `leg_inefficiency`.
+
+The intended conceptual metric is:
+
+```
+efficiency = straight displacement / total travelled path
+inefficiency = 1 - efficiency
+```
+
+Both numerator and denominator MUST use the same origin.
+
+We had concluded that if the geometric leg origin is the actual pivot extreme, then total path must also start at that pivot extreme rather than starting from an unrelated previous close.
+
+Please inspect the CURRENT implementation and determine whether this has been correctly resolved. Do not blindly implement the previous suggestion if the existing code now differs.
+
+More generally, audit every stateful feature for:
+
+* reset timing;
+* origin consistency;
+* behaviour immediately after confirmation;
+* behaviour on `t* -> t_c`;
+* accidental negative/out-of-range values;
+* stale state carried into a new leg.
+
+## Pivot labels
+
+The planned first label is binary:
+
+```
+is_pivot[t] = 1 if bar t was later confirmed by the ZigZag as the actual pivot location t*
+              0 otherwise
+```
+
+The confirmation bar itself should not receive the positive label unless it is coincidentally also the true pivot location.
+
+We previously observed roughly 309 pivots in about 5,000 bars after adjusting pivot-separation logic, which is enough for an exploratory Random Forest baseline but still small enough that validation methodology matters.
+
+Please verify the actual current count from the data rather than relying on that historical number.
+
+High and low pivots may eventually be:
+
+* one binary target (`is_pivot`), with direction/context as features; or
+* two separate targets/models (`is_high_pivot`, `is_low_pivot`).
+
+Challenge which formulation is preferable.
+
+## Critical research question
+
+Do NOT assume that predicting the exact ZigZag pivot is necessarily the economically best target.
+
+The ZigZag label depends on configurable thresholds, so a model may simply learn the behaviour of that particular detector.
+
+As part of the research design, compare or at least propose alternatives such as:
+
+1. exact ZigZag pivot `t*`;
+2. pivot within ±N bars;
+3. bar followed by a reversal of at least X ATR before continuation of Y ATR;
+4. probability of a meaningful reversal within N bars;
+5. separate continuation-vs-reversal outcome from the current running extreme;
+6. high-pivot and low-pivot models separately.
+
+The existing pivot scenario code contains MFE/MAE, ATR-normalized excursions and time-to-target machinery which may be reusable for these alternative economic labels.
+
+## Existing analysis infrastructure
+
+There is already a generic `FeatureEvaluator`.
+
+Reuse it where sensible rather than rebuilding equivalent functionality. It supports things such as:
+
+* numeric feature quantile analysis;
+* categorical feature grouping;
+* base probability / event probability;
+* lift and relative lift;
+* z-statistics;
+* monotonicity;
+* threshold exploration;
+* feature combinations.
+
+The project has previously used this framework for wick analysis before moving toward ML.
+
+## Proposed research sequence
+
+I want you first to inspect and critique the existing implementation, then propose the smallest clean research pipeline.
+
+Preferred sequence:
+
+### Phase 1 — correctness audit
+
+Audit:
+
+* exact `t*` versus `t_c` semantics;
+* pivot label generation;
+* ordering in `ZigZagATR.update()`;
+* all feature reset/update timing;
+* macro/micro state timing;
+* candidate/run-extreme handling;
+* retracement calculations;
+* leg inefficiency;
+* any feature leakage;
+* any raw price/time variables that should instead be transformed or normalized.
+
+Do not modify production code unless there is a clear correctness issue.
+
+### Phase 2 — dataset
+
+Create or propose a generic dataset builder where:
+
+* one row = one completed bar;
+* X = only information available at that bar;
+* y = eventual pivot label for that same bar;
+* metadata such as timestamp, pivot confirmation time etc. is retained separately and never accidentally used as model input;
+* categorical and numerical feature definitions are explicit.
+
+Prefer generic/reusable code rather than hard-coding BTC or one timeframe.
+
+### Phase 3 — descriptive feature research
+
+Before Random Forest:
+
+* report target prevalence;
+* analyse each feature with the existing FeatureEvaluator;
+* examine distributions on pivot vs non-pivot bars;
+* inspect monotonicity;
+* inspect highly correlated/redundant features;
+* test stability through time;
+* compare high and low pivots;
+* identify suspiciously powerful features that may indicate leakage.
+
+### Phase 4 — baseline ML
+
+Only after Phase 1–3:
+
+* build a Random Forest baseline;
+* use chronological / walk-forward validation, NOT a random train/test split;
+* account for class imbalance;
+* report precision, recall, PR-AUC and probability calibration;
+* include a simple baseline comparison;
+* inspect permutation importance rather than relying only on impurity importance;
+* optionally use SHAP later, but keep the first implementation simple.
+
+The purpose of the first RF is NOT parameter optimisation. It is to answer:
+
+> Is there real out-of-sample information in these features about future identification of the current bar as a pivot?
+
+### Phase 5 — trading relevance
+
+If exact-pivot prediction shows signal, investigate whether probability buckets correspond to useful forward:
+
+* return;
+* MFE;
+* MAE;
+* time-to-reversal;
+* risk/reward.
+
+Only then should we consider turning it into an actual trading strategy.
+
+## Coding preferences
+
+Follow the style of the existing repository.
+
+In Python:
+
+* use single quotes for strings where possible;
+* use tuples instead of lists when the collection is immutable;
+* avoid unnecessary abstraction and verbosity;
+* keep functions small and direct;
+* reuse existing framework/utilities before introducing new classes;
+* do not silently refactor unrelated code.
+
+## First task
+
+Do NOT immediately implement the ML model.
+
+First:
+
+1. inspect the relevant repository files;
+2. explain back to me how the current pivot detector and its state transitions actually work;
+3. identify correctness/leakage/research-design concerns;
+4. inventory the existing features and classify them as:
+
+   * safe direct ML feature;
+   * safe after transformation;
+   * redundant;
+   * possible leakage / should exclude;
+5. inspect what reusable analysis/dataset infrastructure already exists;
+6. propose the exact next implementation steps and files to create/change.
+
+Be critical. If the current pivot definition, feature definition, or proposed target is questionable, say so rather than preserving it for compatibility.
+
+
+## Existing test/data setup
+
+Before creating any new test harness or synthetic dataset, inspect the repository for the existing scripts that currently run or analyse `pivot_detector_1h` / `ZigZagATR`.
+
+The project already has local OHLCV data accessible through the existing `MarketData` / `RawData` infrastructure. Prefer using that rather than creating a new data loader.
+
+For the initial audit and exploratory study, use an existing liquid dataset already present locally, preferably BTC/USDT 1h if available, since this has historically been used for the pivot research.
+
+Please:
+
+1. find the existing pivot test/research script(s);
+2. identify how `pivot_detector_1h` is currently executed;
+3. identify the available local datasets and date ranges;
+4. reuse the existing `MarketData` infrastructure;
+5. run the current implementation unchanged first and establish baseline diagnostics;
+6. only create a new dedicated pivot-research script if the existing scripts are unsuitable.
+
+If there are several possible scripts or datasets, tell me which one you recommend using and why before creating redundant infrastructure.
+
+For the first baseline, report at minimum:
+
+* number of bars;
+* number of confirmed pivot highs;
+* number of confirmed pivot lows;
+* total pivot prevalence;
+* distribution of confirmation delay `t_c - t*` if recoverable;
+* missing/invalid feature counts;
+* obvious feature range violations;
+* several concrete examples tracing `t* -> t_c` so we can verify causal state behaviour manually.
