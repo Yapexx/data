@@ -1,0 +1,16 @@
+{
+  "colour_by_volume": {
+    "description": "Candle colour crossed with the saved volume-ratio bins",
+    "mode": "bins",
+    "features": ["ctx_candle_color", "ctx_volume_ema14_inclusive_ratio"],
+    "max_buckets": 100
+  },
+  "green_with_above_normal_volume": {
+    "description": "GREEN candle with volume above 1.25 and at most 2 times EMA14",
+    "mode": "conditions",
+    "conditions": [
+      {"feature": "ctx_candle_color", "op": "==", "value": "GREEN"},
+      {"feature": "ctx_volume_ema14_inclusive_ratio", "op": "between", "value": [1.25, 2], "closed": "right"}
+    ]
+  }
+}
